@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+package raft;
+
+option go_package = "titanstore/proto";
+
+// Raft RPC Service - Nodes communicate using these methods
+service RaftService {
+  // RequestVote: Candidates ask for votes during election
+  rpc RequestVote(VoteRequest) returns (VoteResponse);
+  
+  // AppendEntries: Leader replicates log entries (also acts as heartbeat)
+  rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
+}
+
+// VoteRequest: Sent by candidates during election
+message VoteRequest {
+  int32 term = 1;           // Candidate's term number
+  string candidate_id = 2;  // ID of candidate requesting vote
+  int32 last_log_index = 3; // Index of candidate's last log entry
+  int32 last_log_term = 4;  // Term of candidate's last log entry
+}
+
+// VoteResponse: Reply to vote request
+message VoteResponse {
+  int32 term = 1;         // Current term for candidate to update itself
+  bool vote_granted = 2;  // True means candidate received vote
+}
+
+// AppendEntriesRequest: Log replication and heartbeat
+message AppendEntriesRequest {
+  int32 term = 1;              // Leader's term
+  string leader_id = 2;        // Leader's ID (so followers can redirect clients)
+  int32 prev_log_index = 3;    // Index of log entry immediately preceding new ones
+  int32 prev_log_term = 4;     // Term of prev_log_index entry
+  repeated LogEntry entries = 5; // Log entries to store (empty for heartbeat)
+  int32 leader_commit = 6;     // Leader's commit index
+}
+
+// AppendEntriesResponse: Reply to append entries
+message AppendEntriesResponse {
+  int32 term = 1;    // Current term for leader to update itself
+  bool success = 2;  // True if follower contained entry matching prev_log_index/term
+}
+
+// LogEntry: Individual command in the replicated log
+message LogEntry {
+  int32 term = 1;     // Term when entry was received by leader
+  string command = 2; // Command for state machine (e.g., "SET x=5")
+}
