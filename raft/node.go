@@ -68,6 +68,9 @@ type RaftNode struct {
 	lastHeartbeat time.Time
 	dataStore     map[string]string
 	leaderId      string
+
+	// Persistence
+	wal WAL
 }
 
 // NewRaftNode creates a new Raft node
@@ -89,6 +92,42 @@ func NewRaftNode(id string, peers map[string]string) *RaftNode {
 	}
 
 	return node
+}
+
+// SetWAL attaches a Write-Ahead Log to the node.
+// Must be called before Start().
+func (rn *RaftNode) SetWAL(w WAL) {
+	rn.wal = w
+}
+
+// GetValue returns the value for key from the in-memory state machine.
+// Safe for concurrent reads.
+func (rn *RaftNode) GetValue(key string) (string, bool) {
+	rn.mu.RLock()
+	defer rn.mu.RUnlock()
+	val, ok := rn.dataStore[key]
+	return val, ok
+}
+
+// RecoverFromWAL replays the WAL file to rebuild rn.log and rn.dataStore.
+// Must be called after SetWAL and before Start().
+func (rn *RaftNode) RecoverFromWAL() error {
+	if rn.wal == nil {
+		return nil
+	}
+
+	records, err := rn.wal.ReadAll()
+	if err != nil {
+		return err
+	}
+	if len(records) == 0 {
+		log.Printf("[%s] WAL empty — fresh start", rn.id)
+		return nil
+	}
+
+	// TODO: replay logic will be wired in Commit #5
+	log.Printf("[%s] WAL found %d records — replay coming in next commit", rn.id, len(records))
+	return nil
 }
 
 // Start begins the Raft consensus protocol
