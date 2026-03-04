@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"math/rand"
+	"strings"
 	"sync"
 	"time"
 
@@ -125,8 +126,39 @@ func (rn *RaftNode) RecoverFromWAL() error {
 		return nil
 	}
 
-	// TODO: replay logic will be wired in Commit #5
-	log.Printf("[%s] WAL found %d records — replay coming in next commit", rn.id, len(records))
+	log.Printf("[%s] WAL found %d records — replaying...", rn.id, len(records))
+
+	lastCommitIndex := int32(-1)
+
+	for _, rec := range records {
+		switch rec.Type {
+		case RecordTypeEntry:
+			entry := LogEntry{Term: rec.Term, Command: rec.Command}
+			for int32(len(rn.log)) <= rec.Index {
+				rn.log = append(rn.log, LogEntry{})
+			}
+			rn.log[rec.Index] = entry
+		case RecordTypeCommit:
+			if rec.CommitIndex > lastCommitIndex {
+				lastCommitIndex = rec.CommitIndex
+			}
+		}
+	}
+
+	if lastCommitIndex >= 0 {
+		rn.commitIndex = lastCommitIndex
+		rn.lastApplied = -1
+		for rn.lastApplied < rn.commitIndex {
+			rn.lastApplied++
+			parts := strings.SplitN(rn.log[rn.lastApplied].Command, " ", 3)
+			if len(parts) == 3 && strings.ToUpper(parts[0]) == "SET" {
+				rn.dataStore[parts[1]] = parts[2]
+			}
+		}
+	}
+
+	log.Printf("[%s] WAL recovery done: %d log entries, commitIndex=%d, %d keys restored",
+		rn.id, len(rn.log), rn.commitIndex, len(rn.dataStore))
 	return nil
 }
 
@@ -344,13 +376,22 @@ func (rn *RaftNode) updateCommitIndex() {
 	}
 }
 
-// applyCommittedEntries applies committed log entries to state machine
+// applyCommittedEntries applies committed log entries to the state machine.
+// Caller must hold rn.mu.Lock().
 func (rn *RaftNode) applyCommittedEntries() {
 	for rn.lastApplied < rn.commitIndex {
 		rn.lastApplied++
 		entry := rn.log[rn.lastApplied]
-		log.Printf("[%s] Applying entry %d: %s", rn.id, rn.lastApplied, entry.Command)
-		// TODO: Parse and execute command
+		parts := strings.SplitN(entry.Command, " ", 3)
+		if len(parts) == 3 && strings.ToUpper(parts[0]) == "SET" {
+			rn.dataStore[parts[1]] = parts[2]
+			log.Printf("[%s] Applied entry %d: SET %s", rn.id, rn.lastApplied, parts[1])
+		}
+	}
+	if rn.wal != nil && rn.lastApplied >= 0 {
+		if err := rn.wal.AppendCommit(rn.lastApplied); err != nil {
+			log.Printf("[%s] WAL commit write failed: %v", rn.id, err)
+		}
 	}
 }
 
@@ -462,10 +503,19 @@ func (rn *RaftNode) AppendEntries(ctx context.Context, req *pb.AppendEntriesRequ
 		insertIndex := req.PrevLogIndex + 1
 		for i, entry := range req.Entries {
 			idx := insertIndex + int32(i)
+			le := LogEntry{Term: entry.Term, Command: entry.Command}
+
+			if rn.wal != nil {
+				if err := rn.wal.AppendEntry(idx, le); err != nil {
+					log.Printf("[%s] WAL write failed for entry %d: %v", rn.id, idx, err)
+					return &pb.AppendEntriesResponse{Term: rn.currentTerm, Success: false}, nil
+				}
+			}
+
 			if idx < int32(len(rn.log)) {
-				rn.log[idx] = LogEntry{Term: entry.Term, Command: entry.Command}
+				rn.log[idx] = le
 			} else {
-				rn.log = append(rn.log, LogEntry{Term: entry.Term, Command: entry.Command})
+				rn.log = append(rn.log, le)
 			}
 		}
 		log.Printf("[%s] Appended %d entries from leader %s", rn.id, len(req.Entries), req.LeaderId)
@@ -484,7 +534,8 @@ func (rn *RaftNode) AppendEntries(ctx context.Context, req *pb.AppendEntriesRequ
 	return &pb.AppendEntriesResponse{Term: rn.currentTerm, Success: true}, nil
 }
 
-// AppendEntry adds a new entry to the log
+// AppendEntry adds a new entry to the log.
+// Writes to WAL first — if WAL fails the entry is rejected.
 func (rn *RaftNode) AppendEntry(command string) bool {
 	rn.mu.Lock()
 	defer rn.mu.Unlock()
@@ -492,12 +543,21 @@ func (rn *RaftNode) AppendEntry(command string) bool {
 	if rn.state != Leader {
 		return false
 	}
+
+	newIndex := int32(len(rn.log))
 	entry := LogEntry{
 		Term:    rn.currentTerm,
 		Command: command,
 	}
-	rn.log = append(rn.log, entry)
-	log.Printf("[%s] Leader appended entry: %s (index: %d)", rn.id, command, len(rn.log)-1)
 
+	if rn.wal != nil {
+		if err := rn.wal.AppendEntry(newIndex, entry); err != nil {
+			log.Printf("[%s] WAL write failed, rejecting entry: %v", rn.id, err)
+			return false
+		}
+	}
+
+	rn.log = append(rn.log, entry)
+	log.Printf("[%s] Leader appended entry: %s (index: %d)", rn.id, command, newIndex)
 	return true
 }
