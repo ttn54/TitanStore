@@ -1,5 +1,14 @@
 package raft
 
+import (
+	"bytes"
+	"encoding/binary"
+	"encoding/gob"
+	"io"
+	"os"
+	"sync"
+)
+
 // RecordType distinguishes WAL record kinds.
 type RecordType uint8
 
@@ -38,4 +47,113 @@ type WAL interface {
 
 	// Close flushes and releases the underlying file handle.
 	Close() error
+}
+
+// FileWAL is the disk-backed implementation of WAL.
+//
+// Wire format (append-only):
+//
+//	[4 bytes big-endian uint32: payload length] [N bytes: gob-encoded WALRecord]
+//	[4 bytes big-endian uint32: payload length] [N bytes: gob-encoded WALRecord]
+//	...
+type FileWAL struct {
+	mu   sync.Mutex
+	file *os.File
+	path string
+}
+
+// NewFileWAL opens or creates the WAL file at path.
+// Existing content is preserved; new records are appended.
+func NewFileWAL(path string) (*FileWAL, error) {
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
+	if err != nil {
+		return nil, err
+	}
+	return &FileWAL{file: f, path: path}, nil
+}
+
+// write serialises rec into a length-prefixed binary frame and fsyncs to disk.
+func (w *FileWAL) write(rec WALRecord) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(rec); err != nil {
+		return err
+	}
+
+	data := buf.Bytes()
+	lenBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(lenBuf, uint32(len(data)))
+
+	if _, err := w.file.Write(lenBuf); err != nil {
+		return err
+	}
+	if _, err := w.file.Write(data); err != nil {
+		return err
+	}
+	// fsync: flush OS page cache to physical media before returning.
+	return w.file.Sync()
+}
+
+// AppendEntry writes a log-entry record before it is added to the in-memory log.
+func (w *FileWAL) AppendEntry(index int32, entry LogEntry) error {
+	return w.write(WALRecord{
+		Type:    RecordTypeEntry,
+		Index:   index,
+		Term:    entry.Term,
+		Command: entry.Command,
+	})
+}
+
+// AppendCommit writes a commit marker so recovery can rebuild the state machine.
+func (w *FileWAL) AppendCommit(commitIndex int32) error {
+	return w.write(WALRecord{
+		Type:        RecordTypeCommit,
+		CommitIndex: commitIndex,
+	})
+}
+
+// ReadAll reads every record from the start of the file.
+// A partial tail record caused by a crash is silently dropped.
+func (w *FileWAL) ReadAll() ([]WALRecord, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if _, err := w.file.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+
+	var records []WALRecord
+	lenBuf := make([]byte, 4)
+
+	for {
+		if _, err := io.ReadFull(w.file, lenBuf); err != nil {
+			// Clean EOF or partial length header — stop reading.
+			break
+		}
+
+		length := binary.BigEndian.Uint32(lenBuf)
+		data := make([]byte, length)
+		if _, err := io.ReadFull(w.file, data); err != nil {
+			// Partial payload from a prior crash — discard tail and stop.
+			break
+		}
+
+		var rec WALRecord
+		if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&rec); err != nil {
+			// Corrupt record — stop reading.
+			break
+		}
+		records = append(records, rec)
+	}
+
+	return records, nil
+}
+
+// Close flushes and closes the underlying file.
+func (w *FileWAL) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.file.Close()
 }
