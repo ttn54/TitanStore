@@ -67,3 +67,68 @@ func TestTCPServer_GET(t *testing.T) {
 	}
 	t.Log("✅ TCP GET handler working correctly")
 }
+
+// TestTCPServer_SET_Leader verifies that SET on a leader node returns OK.
+func TestTCPServer_SET_Leader(t *testing.T) {
+	node := NewRaftNode("leader-node", map[string]string{})
+	// Manually promote to leader state so AppendEntry succeeds
+	node.mu.Lock()
+	node.state = Leader
+	node.currentTerm = 1
+	node.mu.Unlock()
+
+	srv, err := NewTCPServer(node, "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("NewTCPServer: %v", err)
+	}
+	defer srv.Close()
+	go srv.Serve()
+
+	conn := dialTCP(t, srv.listener.Addr().String())
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+
+	// SET should return OK
+	fmt.Fprint(conn, "SET city vancouver\n")
+	resp, _ := reader.ReadString('\n')
+	if strings.TrimSpace(resp) != "OK" {
+		t.Fatalf("expected OK, got %q", strings.TrimSpace(resp))
+	}
+
+	// DELETE should return OK
+	fmt.Fprint(conn, "DELETE city\n")
+	resp, _ = reader.ReadString('\n')
+	if strings.TrimSpace(resp) != "OK" {
+		t.Fatalf("expected OK for DELETE, got %q", strings.TrimSpace(resp))
+	}
+
+	t.Log("✅ SET and DELETE on leader return OK")
+}
+
+// TestTCPServer_SET_Follower verifies that SET on a follower returns ERR NOT_LEADER.
+func TestTCPServer_SET_Follower(t *testing.T) {
+	node := NewRaftNode("follower-node", map[string]string{"leader-node": "localhost:5001"})
+	// Stays as Follower with a known leader
+	node.mu.Lock()
+	node.leaderId = "leader-node"
+	node.mu.Unlock()
+
+	srv, err := NewTCPServer(node, "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("NewTCPServer: %v", err)
+	}
+	defer srv.Close()
+	go srv.Serve()
+
+	conn := dialTCP(t, srv.listener.Addr().String())
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+
+	fmt.Fprint(conn, "SET key val\n")
+	resp, _ := reader.ReadString('\n')
+	got := strings.TrimSpace(resp)
+	if !strings.HasPrefix(got, "ERR NOT_LEADER") {
+		t.Fatalf("expected ERR NOT_LEADER ..., got %q", got)
+	}
+	t.Logf("✅ Follower correctly redirects: %s", got)
+}

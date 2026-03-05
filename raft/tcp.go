@@ -9,14 +9,18 @@ import (
 )
 
 // TCPServer is a lightweight text-protocol server that lets external clients
-// query the local node's state machine.
+// query and mutate the local node's state machine.
 //
 // Protocol (newline-terminated):
 //
 //	Request:  GET <key>\n
-//	Response: VALUE <value>\n   — key found
-//	          NOT_FOUND\n       — key absent
-//	          ERR <reason>\n    — malformed request
+//	          SET <key> <value>\n
+//	          DELETE <key>\n
+//	Response: VALUE <value>\n        — GET found
+//	          NOT_FOUND\n            — GET miss
+//	          OK\n                   — SET/DELETE accepted by leader
+//	          ERR NOT_LEADER <addr>\n — forwarded to leader address
+//	          ERR <reason>\n         — malformed request
 type TCPServer struct {
 	node     *RaftNode
 	listener net.Listener
@@ -60,7 +64,7 @@ func (s *TCPServer) handleConn(conn net.Conn) {
 			continue
 		}
 
-		parts := strings.SplitN(line, " ", 2)
+		parts := strings.SplitN(line, " ", 3)
 		cmd := strings.ToUpper(parts[0])
 
 		var response string
@@ -76,6 +80,18 @@ func (s *TCPServer) handleConn(conn net.Conn) {
 					response = "NOT_FOUND"
 				}
 			}
+		case "SET":
+			if len(parts) < 3 || strings.TrimSpace(parts[1]) == "" {
+				response = "ERR usage: SET <key> <value>"
+			} else {
+				response = s.propose(fmt.Sprintf("SET %s %s", parts[1], parts[2]))
+			}
+		case "DELETE":
+			if len(parts) < 2 || strings.TrimSpace(parts[1]) == "" {
+				response = "ERR usage: DELETE <key>"
+			} else {
+				response = s.propose(fmt.Sprintf("DELETE %s", strings.TrimSpace(parts[1])))
+			}
 		default:
 			response = fmt.Sprintf("ERR unknown command %q", cmd)
 		}
@@ -83,4 +99,16 @@ func (s *TCPServer) handleConn(conn net.Conn) {
 		fmt.Fprintf(writer, "%s\n", response)
 		writer.Flush()
 	}
+}
+
+// propose submits command to the Raft log if this node is leader.
+// Returns "OK", "ERR NOT_LEADER <addr>", or "ERR NO_LEADER".
+func (s *TCPServer) propose(command string) string {
+	if s.node.AppendEntry(command) {
+		return "OK"
+	}
+	if addr, ok := s.node.GetLeaderAddr(); ok {
+		return fmt.Sprintf("ERR NOT_LEADER %s", addr)
+	}
+	return "ERR NO_LEADER"
 }

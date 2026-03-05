@@ -110,6 +110,29 @@ func (rn *RaftNode) GetValue(key string) (string, bool) {
 	return val, ok
 }
 
+// GetLeaderAddr returns the gRPC address of the known leader, or ("", false)
+// when the leader is unknown. Safe for concurrent reads.
+func (rn *RaftNode) GetLeaderAddr() (string, bool) {
+	rn.mu.RLock()
+	defer rn.mu.RUnlock()
+	if rn.leaderId == "" {
+		return "", false
+	}
+	addr, ok := rn.peers[rn.leaderId]
+	if !ok {
+		// This node itself is the leader
+		addr = rn.peers[rn.id]
+	}
+	return addr, rn.leaderId != ""
+}
+
+// IsLeader reports whether this node is currently the Raft leader.
+func (rn *RaftNode) IsLeader() bool {
+	rn.mu.RLock()
+	defer rn.mu.RUnlock()
+	return rn.state == Leader
+}
+
 // RecoverFromWAL replays the WAL file to rebuild rn.log and rn.dataStore.
 // Must be called after SetWAL and before Start().
 func (rn *RaftNode) RecoverFromWAL() error {
