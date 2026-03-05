@@ -38,6 +38,18 @@ func main() {
 
 	node := raft.NewRaftNode(*nodeID, peers)
 
+	// --- WAL boot sequence ---
+	walPath := fmt.Sprintf("disk_%s.wal", *nodeID)
+	wal, err := raft.NewFileWAL(walPath)
+	if err != nil {
+		log.Fatalf("Failed to open WAL at %s: %v", walPath, err)
+	}
+	node.SetWAL(wal)
+
+	if err := node.RecoverFromWAL(); err != nil {
+		log.Fatalf("WAL recovery failed: %v", err)
+	}
+
 	lis, err := net.Listen("tcp", ":"+*port)
 	if err != nil {
 		log.Fatalf("Failed to listen: %v", err)
@@ -61,4 +73,7 @@ func main() {
 
 	fmt.Println("\nShutting down gracefully...")
 	grpcServer.GracefulStop()
+	if err := wal.Close(); err != nil {
+		log.Printf("WAL close error: %v", err)
+	}
 }
