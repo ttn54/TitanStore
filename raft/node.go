@@ -224,6 +224,7 @@ func (rn *RaftNode) startElection() {
 	rn.state = Candidate
 	rn.currentTerm++
 	rn.votedFor = rn.id
+	rn.leaderId = "" // leader unknown during an election
 	rn.lastHeartbeat = time.Now()
 	currentTerm := rn.currentTerm
 

@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"strings"
+	"time"
 )
 
 // TCPServer is a lightweight text-protocol server that lets external clients
@@ -58,7 +59,14 @@ func (s *TCPServer) handleConn(conn net.Conn) {
 	scanner := bufio.NewScanner(conn)
 	writer := bufio.NewWriter(conn)
 
-	for scanner.Scan() {
+	const idleTimeout = 5 * time.Minute
+
+	for {
+		// Reset the read deadline before every blocking Scan call.
+		conn.SetReadDeadline(time.Now().Add(idleTimeout))
+		if !scanner.Scan() {
+			break
+		}
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
 			continue
@@ -98,6 +106,9 @@ func (s *TCPServer) handleConn(conn net.Conn) {
 
 		fmt.Fprintf(writer, "%s\n", response)
 		writer.Flush()
+	}
+	if err := scanner.Err(); err != nil {
+		log.Printf("TCP client read error (%s): %v", conn.RemoteAddr(), err)
 	}
 }
 

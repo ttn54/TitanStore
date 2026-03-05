@@ -61,7 +61,7 @@ func main() {
 
 	node.Start()
 
-	// --- TCP client listener (GET only) ---
+	// --- TCP client listener (GET / SET / DELETE) ---
 	var tcpSrv *raft.TCPServer
 	if *clientPort != "" {
 		var tcpErr error
