@@ -18,6 +18,7 @@ import (
 func main() {
 	nodeID := flag.String("id", "node1", "Node ID")
 	port := flag.String("port", "5001", "Port to listen on")
+	clientPort := flag.String("client-port", "", "TCP client listener port (e.g. 6001); empty = disabled")
 	flag.Parse()
 
 	peers := make(map[string]string)
@@ -60,6 +61,17 @@ func main() {
 
 	node.Start()
 
+	// --- TCP client listener (GET only) ---
+	var tcpSrv *raft.TCPServer
+	if *clientPort != "" {
+		var tcpErr error
+		tcpSrv, tcpErr = raft.NewTCPServer(node, ":"+*clientPort)
+		if tcpErr != nil {
+			log.Fatalf("Failed to start TCP client listener: %v", tcpErr)
+		}
+		go tcpSrv.Serve()
+	}
+
 	go func() {
 		log.Printf("gRPC server listening on :%s", *port)
 		if err := grpcServer.Serve(lis); err != nil {
@@ -73,6 +85,9 @@ func main() {
 
 	fmt.Println("\nShutting down gracefully...")
 	grpcServer.GracefulStop()
+	if tcpSrv != nil {
+		tcpSrv.Close()
+	}
 	if err := wal.Close(); err != nil {
 		log.Printf("WAL close error: %v", err)
 	}
