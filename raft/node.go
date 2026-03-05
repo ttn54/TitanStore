@@ -150,10 +150,7 @@ func (rn *RaftNode) RecoverFromWAL() error {
 		rn.lastApplied = -1
 		for rn.lastApplied < rn.commitIndex {
 			rn.lastApplied++
-			parts := strings.SplitN(rn.log[rn.lastApplied].Command, " ", 3)
-			if len(parts) == 3 && strings.ToUpper(parts[0]) == "SET" {
-				rn.dataStore[parts[1]] = parts[2]
-			}
+			rn.executeCommand(rn.lastApplied, rn.log[rn.lastApplied].Command)
 		}
 	}
 
@@ -376,17 +373,30 @@ func (rn *RaftNode) updateCommitIndex() {
 	}
 }
 
+// executeCommand applies a single command string to the in-memory dataStore.
+// Caller must hold rn.mu.Lock().
+func (rn *RaftNode) executeCommand(index int32, cmd string) {
+	parts := strings.SplitN(cmd, " ", 3)
+	switch strings.ToUpper(parts[0]) {
+	case "SET":
+		if len(parts) == 3 {
+			rn.dataStore[parts[1]] = parts[2]
+			log.Printf("[%s] Applied entry %d: SET %s", rn.id, index, parts[1])
+		}
+	case "DELETE":
+		if len(parts) >= 2 {
+			delete(rn.dataStore, parts[1])
+			log.Printf("[%s] Applied entry %d: DELETE %s", rn.id, index, parts[1])
+		}
+	}
+}
+
 // applyCommittedEntries applies committed log entries to the state machine.
 // Caller must hold rn.mu.Lock().
 func (rn *RaftNode) applyCommittedEntries() {
 	for rn.lastApplied < rn.commitIndex {
 		rn.lastApplied++
-		entry := rn.log[rn.lastApplied]
-		parts := strings.SplitN(entry.Command, " ", 3)
-		if len(parts) == 3 && strings.ToUpper(parts[0]) == "SET" {
-			rn.dataStore[parts[1]] = parts[2]
-			log.Printf("[%s] Applied entry %d: SET %s", rn.id, rn.lastApplied, parts[1])
-		}
+		rn.executeCommand(rn.lastApplied, rn.log[rn.lastApplied].Command)
 	}
 	if rn.wal != nil && rn.lastApplied >= 0 {
 		if err := rn.wal.AppendCommit(rn.lastApplied); err != nil {

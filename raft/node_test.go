@@ -271,3 +271,30 @@ func testListen(addr string) (net.Listener, error) {
 	
 	return nil, err
 }
+
+// TestExecuteCommand_DELETE verifies SET then DELETE removes the key.
+func TestExecuteCommand_DELETE(t *testing.T) {
+	node := NewRaftNode("test-del", map[string]string{})
+
+	// Simulate log with SET then DELETE
+	node.log = []LogEntry{
+		{Term: 1, Command: "SET color blue"},
+		{Term: 1, Command: "SET name zen"},
+		{Term: 1, Command: "DELETE color"},
+	}
+	node.commitIndex = 2
+
+	// Apply all entries
+	node.applyCommittedEntries()
+
+	// "color" should be gone
+	if _, ok := node.dataStore["color"]; ok {
+		t.Fatal("expected key 'color' to be deleted, but it still exists")
+	}
+	// "name" should still be present
+	val, ok := node.dataStore["name"]
+	if !ok || val != "zen" {
+		t.Fatalf("expected name=zen, got %q (ok=%v)", val, ok)
+	}
+	t.Log("✅ DELETE command correctly removes key from dataStore")
+}
