@@ -148,3 +148,106 @@ func TestWAL_CrashRecovery(t *testing.T) {
 
 	t.Log("✅ Crash recovery: partial tail silently dropped, good records intact")
 }
+
+// TestWALRecovery_EndToEnd simulates a full power-cycle:
+//  1. A leader node writes and commits several keys to disk via WAL.
+//  2. The node is discarded (simulating a restart).
+//  3. A fresh node opens the same WAL file and calls RecoverFromWAL.
+//  4. The test verifies every key is restored exactly, and commitIndex is correct.
+func TestWALRecovery_EndToEnd(t *testing.T) {
+	f, err := os.CreateTemp("", "titanstore-e2e-*.wal")
+	if err != nil {
+		t.Fatalf("could not create temp WAL file: %v", err)
+	}
+	walPath := f.Name()
+	f.Close()
+	defer os.Remove(walPath)
+
+	// --- Phase 1: write and commit three keys ---
+	{
+		wal, err := NewFileWAL(walPath)
+		if err != nil {
+			t.Fatalf("NewFileWAL (phase 1): %v", err)
+		}
+
+		node := NewRaftNode("e2e-node", map[string]string{})
+		node.SetWAL(wal)
+
+		// Promote to leader so AppendEntry is accepted
+		node.mu.Lock()
+		node.state = Leader
+		node.currentTerm = 1
+		node.mu.Unlock()
+
+		commands := []string{
+			"SET city vancouver",
+			"SET lang go",
+			"SET version 2",
+			"DELETE lang", // delete one key to verify DELETE survives recovery
+		}
+		for _, cmd := range commands {
+			if !node.AppendEntry(cmd) {
+				t.Fatalf("AppendEntry(%q) failed", cmd)
+			}
+		}
+
+		// Advance commitIndex and flush the commit record to WAL
+		node.mu.Lock()
+		node.commitIndex = int32(len(node.log) - 1)
+		node.applyCommittedEntries()
+		node.mu.Unlock()
+
+		if err := wal.Close(); err != nil {
+			t.Fatalf("wal.Close (phase 1): %v", err)
+		}
+	}
+
+	// --- Phase 2: fresh node recovers from the WAL ---
+	{
+		wal, err := NewFileWAL(walPath)
+		if err != nil {
+			t.Fatalf("NewFileWAL (phase 2): %v", err)
+		}
+		defer wal.Close()
+
+		node := NewRaftNode("e2e-node", map[string]string{})
+		node.SetWAL(wal)
+
+		if err := node.RecoverFromWAL(); err != nil {
+			t.Fatalf("RecoverFromWAL: %v", err)
+		}
+
+		// city and version should be present; lang was deleted
+		want := map[string]string{
+			"city":    "vancouver",
+			"version": "2",
+		}
+		for k, wantVal := range want {
+			got, ok := node.GetValue(k)
+			if !ok {
+				t.Errorf("key %q missing after recovery", k)
+				continue
+			}
+			if got != wantVal {
+				t.Errorf("key %q: want %q, got %q", k, wantVal, got)
+			}
+		}
+
+		// lang was deleted — must not be present
+		if _, ok := node.GetValue("lang"); ok {
+			t.Error("key \"lang\" should have been deleted but is present after recovery")
+		}
+
+		// commitIndex and lastApplied should match
+		node.mu.RLock()
+		ci := node.commitIndex
+		la := node.lastApplied
+		node.mu.RUnlock()
+
+		if ci != 3 || la != 3 {
+			t.Errorf("expected commitIndex=3 lastApplied=3, got commitIndex=%d lastApplied=%d", ci, la)
+		}
+	}
+
+	t.Log("✅ End-to-end WAL recovery: all keys (including DELETE) restored after simulated restart")
+}
