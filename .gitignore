@@ -1,13 +1,12 @@
 # Planning and documentation (private)
 CONTEXT.md
-README.md
 WEEK1_COMPLETE.md
 WEEK1_STATUS.md
 *.instructions.md
-
+DEVELOPMENT_JOURNAL.md
 # Tutorial files (learning materials)
 tutorials/
-
+.github/
 # Build artifacts
 bin/
 *.exe
@@ -39,3 +38,5 @@ go.work
 # Temporary files
 tmp/
 temp/
+# Root-level build artifact
+server

@@ -72,8 +72,8 @@ type RaftNode struct {
 	leaderId      string
 
 	// Persistence
-	wal          WAL
-	snapshotPath string
+	wal           WAL
+	snapshotPath  string
 	snapshotIndex int32
 	snapshotTerm  int32
 
@@ -84,15 +84,15 @@ type RaftNode struct {
 // NewRaftNode creates a new Raft node
 func NewRaftNode(id string, peers map[string]string) *RaftNode {
 	node := &RaftNode{
-		id:            id,
-		currentTerm:   0,
-		votedFor:      "",
-		log:           make([]LogEntry, 0),
-		commitIndex:   -1,
-		lastApplied:   -1,
-		state:         Follower,
-		nextIndex:     make(map[string]int32),
-		matchIndex:    make(map[string]int32),
+		id:              id,
+		currentTerm:     0,
+		votedFor:        "",
+		log:             make([]LogEntry, 0),
+		commitIndex:     -1,
+		lastApplied:     -1,
+		state:           Follower,
+		nextIndex:       make(map[string]int32),
+		matchIndex:      make(map[string]int32),
 		peers:           peers,
 		peerClientAddrs: make(map[string]string),
 		dataStore:       make(map[string]string),

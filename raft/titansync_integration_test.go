@@ -16,12 +16,12 @@ import (
 
 // clusterNode bundles everything needed to run a single Raft node in a test.
 type clusterNode struct {
-	raft       *RaftNode
-	grpcSrv    *grpc.Server
-	tcpSrv     *TCPServer
-	walPath    string
-	snapPath   string
-	tcpAddr    string // host:port of the TCP client listener
+	raft     *RaftNode
+	grpcSrv  *grpc.Server
+	tcpSrv   *TCPServer
+	walPath  string
+	snapPath string
+	tcpAddr  string // host:port of the TCP client listener
 }
 
 // stopClusterNode tears down the TCP server and gRPC server for a node,

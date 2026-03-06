@@ -120,7 +120,7 @@ func TestWAL_CrashRecovery(t *testing.T) {
 	// Simulate crash: append a partial/corrupt frame directly to the file
 	f, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0644)
 	f.Write([]byte{0x00, 0x00, 0x00, 0x10}) // length header says 16 bytes follow
-	f.Write([]byte{0xDE, 0xAD, 0xBE})        // only 3 bytes — crash mid-write
+	f.Write([]byte{0xDE, 0xAD, 0xBE})       // only 3 bytes — crash mid-write
 	f.Close()
 
 	// Re-open WAL and read back
