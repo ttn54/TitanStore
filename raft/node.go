@@ -101,6 +101,19 @@ func (rn *RaftNode) SetWAL(w WAL) {
 	rn.wal = w
 }
 
+// persistTermVote writes the current term and votedFor to the WAL.
+// MUST be called while rn.mu is held (Lock, not RLock).
+// Errors are logged but not fatal — the in-memory state is already mutated.
+func (rn *RaftNode) persistTermVote() {
+	if rn.wal == nil {
+		return
+	}
+	if err := rn.wal.AppendTermVote(rn.currentTerm, rn.votedFor); err != nil {
+		log.Printf("[%s] WAL term/vote write failed (term=%d voted=%q): %v",
+			rn.id, rn.currentTerm, rn.votedFor, err)
+	}
+}
+
 // GetValue returns the value for key from the in-memory state machine.
 // Safe for concurrent reads.
 func (rn *RaftNode) GetValue(key string) (string, bool) {
@@ -152,6 +165,8 @@ func (rn *RaftNode) RecoverFromWAL() error {
 	log.Printf("[%s] WAL found %d records — replaying...", rn.id, len(records))
 
 	lastCommitIndex := int32(-1)
+	lastTerm := int32(0)
+	lastVotedFor := ""
 
 	for _, rec := range records {
 		switch rec.Type {
@@ -165,7 +180,16 @@ func (rn *RaftNode) RecoverFromWAL() error {
 			if rec.CommitIndex > lastCommitIndex {
 				lastCommitIndex = rec.CommitIndex
 			}
+		case RecordTypeTermVote:
+			// Track the last (highest-sequence) term/vote record.
+			lastTerm = rec.Term
+			lastVotedFor = rec.VotedFor
 		}
+	}
+
+	if lastTerm > 0 || lastVotedFor != "" {
+		rn.currentTerm = lastTerm
+		rn.votedFor = lastVotedFor
 	}
 
 	if lastCommitIndex >= 0 {
@@ -227,6 +251,7 @@ func (rn *RaftNode) startElection() {
 	rn.leaderId = "" // leader unknown during an election
 	rn.lastHeartbeat = time.Now()
 	currentTerm := rn.currentTerm
+	rn.persistTermVote() // persist before releasing lock
 
 	log.Printf("[%s] Starting election for term %d", rn.id, currentTerm)
 
@@ -355,6 +380,7 @@ func (rn *RaftNode) sendAppendEntries(peerID, peerAddr string, term int32) {
 		rn.currentTerm = resp.Term
 		rn.state = Follower
 		rn.votedFor = ""
+		rn.persistTermVote()
 		log.Printf("[%s] Stepping down - discovered higher term %d", rn.id, resp.Term)
 		return
 	}
@@ -459,6 +485,7 @@ func (rn *RaftNode) requestVoteFromPeer(peerAddr string, term, lastLogIndex, las
 			rn.currentTerm = resp.Term
 			rn.state = Follower
 			rn.votedFor = ""
+			rn.persistTermVote()
 		}
 		rn.mu.Unlock()
 		return false
@@ -483,6 +510,7 @@ func (rn *RaftNode) RequestVote(ctx context.Context, req *pb.VoteRequest) (*pb.V
 		rn.currentTerm = req.Term
 		rn.state = Follower
 		rn.votedFor = ""
+		rn.persistTermVote()
 	}
 
 	voteGranted := false
@@ -500,6 +528,7 @@ func (rn *RaftNode) RequestVote(ctx context.Context, req *pb.VoteRequest) (*pb.V
 			rn.votedFor = req.CandidateId
 			voteGranted = true
 			rn.resetElectionTimer()
+			rn.persistTermVote()
 			log.Printf("[%s] Granted vote to %s for term %d", rn.id, req.CandidateId, req.Term)
 		}
 	}
@@ -521,6 +550,7 @@ func (rn *RaftNode) AppendEntries(ctx context.Context, req *pb.AppendEntriesRequ
 		rn.state = Follower
 		rn.votedFor = ""
 		rn.leaderId = req.LeaderId
+		rn.persistTermVote()
 		rn.resetElectionTimer()
 	}
 

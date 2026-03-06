@@ -149,6 +149,101 @@ func TestWAL_CrashRecovery(t *testing.T) {
 	t.Log("✅ Crash recovery: partial tail silently dropped, good records intact")
 }
 
+// TestWAL_TermVote_RoundTrip verifies AppendTermVote records survive close/reopen.
+func TestWAL_TermVote_RoundTrip(t *testing.T) {
+	wal, path := tempWAL(t)
+	defer os.Remove(path)
+
+	if err := wal.AppendTermVote(3, "nodeA"); err != nil {
+		t.Fatalf("AppendTermVote failed: %v", err)
+	}
+	if err := wal.AppendTermVote(5, "nodeB"); err != nil {
+		t.Fatalf("AppendTermVote (2) failed: %v", err)
+	}
+	wal.Close()
+
+	wal2, err := NewFileWAL(path)
+	if err != nil {
+		t.Fatalf("reopen failed: %v", err)
+	}
+	defer wal2.Close()
+
+	records, err := wal2.ReadAll()
+	if err != nil {
+		t.Fatalf("ReadAll failed: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("expected 2 records, got %d", len(records))
+	}
+	if records[0].Type != RecordTypeTermVote || records[0].Term != 3 || records[0].VotedFor != "nodeA" {
+		t.Errorf("record 0 mismatch: %+v", records[0])
+	}
+	if records[1].Type != RecordTypeTermVote || records[1].Term != 5 || records[1].VotedFor != "nodeB" {
+		t.Errorf("record 1 mismatch: %+v", records[1])
+	}
+	t.Log("✅ TermVote records round-trip correctly through WAL")
+}
+
+// TestRecoverFromWAL_RestoresTermAndVote verifies that currentTerm and votedFor
+// are rebuilt correctly after a simulated restart.
+func TestRecoverFromWAL_RestoresTermAndVote(t *testing.T) {
+	f, err := os.CreateTemp("", "titanstore-termvote-*.wal")
+	if err != nil {
+		t.Fatalf("temp file: %v", err)
+	}
+	walPath := f.Name()
+	f.Close()
+	defer os.Remove(walPath)
+
+	// Phase 1: node simulates two term bumps then grants a vote
+	{
+		wal, _ := NewFileWAL(walPath)
+		node := NewRaftNode("n1", map[string]string{})
+		node.SetWAL(wal)
+
+		// Simulate term=1, votedFor=n1
+		node.mu.Lock()
+		node.currentTerm = 1
+		node.votedFor = "n1"
+		node.persistTermVote()
+		node.mu.Unlock()
+
+		// Simulate stepping up to term=3, voted for someone else
+		node.mu.Lock()
+		node.currentTerm = 3
+		node.votedFor = "n2"
+		node.persistTermVote()
+		node.mu.Unlock()
+
+		wal.Close()
+	}
+
+	// Phase 2: fresh node recovers
+	{
+		wal, _ := NewFileWAL(walPath)
+		node := NewRaftNode("n1", map[string]string{})
+		node.SetWAL(wal)
+
+		if err := node.RecoverFromWAL(); err != nil {
+			t.Fatalf("RecoverFromWAL: %v", err)
+		}
+		wal.Close()
+
+		node.mu.RLock()
+		term := node.currentTerm
+		voted := node.votedFor
+		node.mu.RUnlock()
+
+		if term != 3 {
+			t.Errorf("expected currentTerm=3, got %d", term)
+		}
+		if voted != "n2" {
+			t.Errorf("expected votedFor=n2, got %q", voted)
+		}
+	}
+	t.Log("✅ currentTerm and votedFor restored correctly after simulated restart")
+}
+
 // TestWALRecovery_EndToEnd simulates a full power-cycle:
 //  1. A leader node writes and commits several keys to disk via WAL.
 //  2. The node is discarded (simulating a restart).

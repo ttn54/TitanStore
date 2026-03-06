@@ -17,6 +17,9 @@ const (
 	RecordTypeEntry RecordType = 1
 	// RecordTypeCommit marks the highest index that has been applied to the state machine.
 	RecordTypeCommit RecordType = 2
+	// RecordTypeTermVote persists currentTerm and votedFor so they survive restarts.
+	// Per the Raft paper these fields are "persistent state" and must never be lost.
+	RecordTypeTermVote RecordType = 3
 )
 
 // WALRecord is the atomic unit written to the Write-Ahead Log.
@@ -27,6 +30,7 @@ type WALRecord struct {
 	Term        int32
 	Command     string
 	CommitIndex int32
+	VotedFor    string // used by RecordTypeTermVote
 }
 
 // WAL is the interface for the Write-Ahead Log.
@@ -39,6 +43,11 @@ type WAL interface {
 	// AppendCommit writes a commit marker so boot-sequence recovery knows
 	// which entries have already been applied to the state machine.
 	AppendCommit(commitIndex int32) error
+
+	// AppendTermVote durably persists currentTerm and votedFor.
+	// Must be called while the node's mutex is held, before releasing it,
+	// so the on-disk state never lags behind the in-memory state.
+	AppendTermVote(term int32, votedFor string) error
 
 	// ReadAll replays every record from the start of the file.
 	// Partial tail records left by a crash are silently dropped.
@@ -111,6 +120,15 @@ func (w *FileWAL) AppendCommit(commitIndex int32) error {
 	return w.write(WALRecord{
 		Type:        RecordTypeCommit,
 		CommitIndex: commitIndex,
+	})
+}
+
+// AppendTermVote persists currentTerm and votedFor to disk.
+func (w *FileWAL) AppendTermVote(term int32, votedFor string) error {
+	return w.write(WALRecord{
+		Type:     RecordTypeTermVote,
+		Term:     term,
+		VotedFor: votedFor,
 	})
 }
 
