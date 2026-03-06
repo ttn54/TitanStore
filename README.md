@@ -74,13 +74,54 @@ echo 'DELETE user:42' | nc localhost 6001
    TCP clients ──→ any node ──→ redirect to leader if needed
 ```
 
-**Consensus:** Two gRPC RPCs implement the full Raft paper — `RequestVote` for elections and `AppendEntries` for replication and heartbeats. Election timeouts are randomised (150–300 ms) to prevent split votes; the leader sends heartbeats every 50 ms.
+---
 
-**Persistence:** Every log entry is written to a binary WAL (4-byte length-prefix + gob payload) and `fsync`'d before the RPC returns. `currentTerm` and `votedFor` are also WAL-persisted before any state transition, satisfying the Raft paper's §5.4 durability requirement.
+## How It Works
 
-**Snapshots:** `TakeSnapshot()` writes a gob-encoded snapshot of the full state machine to a temp file, calls `fsync`, then `os.Rename` — which is atomic on Linux. The WAL is then truncated so recovery time is bounded by state size, not log history.
+### Leader Election
 
-**Leader redirect:** When a follower receives a write, it replies `ERR NOT_LEADER <addr>` where `<addr>` is the leader's **TCP** port (not gRPC), so the client can reconnect and retry directly.
+All nodes start as Followers. Each picks a random election timeout (150–300 ms). If no heartbeat arrives before the timeout fires, the node becomes a Candidate: it increments its term, votes for itself, and sends `RequestVote` RPCs to all peers. The first candidate to collect a strict majority wins and becomes Leader. The randomised timeout prevents all nodes from timing out simultaneously and splitting votes.
+
+Once elected, the leader sends `AppendEntries` heartbeats every 50 ms to reset every follower's timer. If the leader dies, the surviving nodes time out and hold a new election within one timeout window.
+
+### Write Path
+
+```
+Client                 Leader                  Followers
+  │                      │                         │
+  │── SET k v ──────────►│                         │
+  │                      │── write to WAL (fsync) ─┤
+  │                      │── AppendEntries RPC ────►│
+  │                      │                         │── write to WAL (fsync)
+  │                      │◄── success (majority) ──┤
+  │                      │── apply to dataStore    │
+  │◄── OK ───────────────│                         │
+```
+
+The leader writes to its own WAL first, then fans out `AppendEntries` RPCs in parallel. Once a strict majority acknowledges, the entry is committed and applied to the in-memory key-value store. The `OK` response is only sent after commit — if the node crashes before that, the write is retried from WAL on recovery.
+
+### Crash Recovery
+
+On boot, the node runs a two-phase recovery:
+
+1. **Load snapshot** — if a snapshot file exists, seed `dataStore`, `commitIndex`, `currentTerm`, and `votedFor` from it.
+2. **Replay WAL tail** — read all WAL records; skip any entries already covered by the snapshot (`index ≤ snapshotIndex`), replay the rest in order.
+
+This bounds recovery time to O(entries since the last snapshot) rather than O(full log history).
+
+### Log Compaction
+
+`TakeSnapshot()` serialises the full `dataStore` to a temp file, calls `fsync`, then calls `os.Rename` to atomically replace the previous snapshot. The WAL is then truncated to a single term/vote record. If the process crashes mid-snapshot, the previous snapshot is untouched — `rename(2)` is atomic on Linux.
+
+### Leader Redirect
+
+If a client sends a write to a follower, the follower replies:
+
+```
+ERR NOT_LEADER localhost:6002
+```
+
+The address is the leader's **TCP client port**, not its gRPC port. The client can immediately reconnect to that address and retry.
 
 ---
 
