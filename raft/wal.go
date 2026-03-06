@@ -54,6 +54,10 @@ type WAL interface {
 	// Called once during boot-sequence recovery only.
 	ReadAll() ([]WALRecord, error)
 
+	// Truncate empties the WAL file so it can be reused after a snapshot.
+	// All existing records are discarded. New records can be appended immediately.
+	Truncate() error
+
 	// Close flushes and releases the underlying file handle.
 	Close() error
 }
@@ -167,6 +171,19 @@ func (w *FileWAL) ReadAll() ([]WALRecord, error) {
 	}
 
 	return records, nil
+}
+
+// Truncate empties the WAL file in-place and repositions the write cursor
+// to the beginning so subsequent Append calls start a fresh log.
+func (w *FileWAL) Truncate() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if err := w.file.Truncate(0); err != nil {
+		return err
+	}
+	_, err := w.file.Seek(0, io.SeekStart)
+	return err
 }
 
 // Close flushes and closes the underlying file.

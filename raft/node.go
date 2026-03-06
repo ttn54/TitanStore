@@ -72,7 +72,10 @@ type RaftNode struct {
 	leaderId      string
 
 	// Persistence
-	wal WAL
+	wal          WAL
+	snapshotPath string
+	snapshotIndex int32 // log index of the last entry captured in the snapshot
+	snapshotTerm  int32 // term of that entry
 }
 
 // NewRaftNode creates a new Raft node
@@ -90,8 +93,9 @@ func NewRaftNode(id string, peers map[string]string) *RaftNode {
 		peers:           peers,
 		peerClientAddrs: make(map[string]string),
 		dataStore:       make(map[string]string),
-		leaderId:      "",
-		lastHeartbeat: time.Now(),
+		leaderId:        "",
+		lastHeartbeat:   time.Now(),
+		snapshotIndex:   -1,
 	}
 
 	return node
@@ -101,6 +105,66 @@ func NewRaftNode(id string, peers map[string]string) *RaftNode {
 // Must be called before Start().
 func (rn *RaftNode) SetWAL(w WAL) {
 	rn.wal = w
+}
+
+// SetSnapshotPath sets the file path used by TakeSnapshot and RecoverFromWAL.
+// Must be called before Start().
+func (rn *RaftNode) SetSnapshotPath(path string) {
+	rn.snapshotPath = path
+}
+
+// TakeSnapshot serialises the current state machine to disk, then truncates
+// the WAL so it only retains the current term/vote record.
+// Must NOT be called while rn.mu is held by the caller.
+func (rn *RaftNode) TakeSnapshot() error {
+	rn.mu.Lock()
+
+	if rn.snapshotPath == "" {
+		rn.mu.Unlock()
+		return nil
+	}
+
+	// Copy all state needed for the snapshot while holding the lock.
+	snap := Snapshot{
+		SnapshotIndex: rn.commitIndex,
+		SnapshotTerm:  rn.currentTerm,
+		CurrentTerm:   rn.currentTerm,
+		VotedFor:      rn.votedFor,
+		DataStore:     make(map[string]string, len(rn.dataStore)),
+	}
+	for k, v := range rn.dataStore {
+		snap.DataStore[k] = v
+	}
+	if rn.commitIndex >= 0 && int(rn.commitIndex) < len(rn.log) {
+		snap.SnapshotTerm = rn.log[rn.commitIndex].Term
+	}
+
+	rn.mu.Unlock()
+
+	// Write snapshot atomically (temp + rename) — outside the lock is safe
+	// because snapshotPath is immutable after SetSnapshotPath.
+	if err := WriteSnapshot(rn.snapshotPath, snap); err != nil {
+		return err
+	}
+
+	// Truncate WAL and re-persist term/vote as the sole surviving record.
+	if rn.wal != nil {
+		if err := rn.wal.Truncate(); err != nil {
+			return err
+		}
+		if err := rn.wal.AppendTermVote(snap.CurrentTerm, snap.VotedFor); err != nil {
+			return err
+		}
+	}
+
+	rn.mu.Lock()
+	rn.snapshotIndex = snap.SnapshotIndex
+	rn.snapshotTerm = snap.SnapshotTerm
+	rn.mu.Unlock()
+
+	log.Printf("[%s] Snapshot taken at index=%d term=%d (%d keys)",
+		rn.id, snap.SnapshotIndex, snap.SnapshotTerm, len(snap.DataStore))
+	return nil
 }
 
 // SetPeerClientAddr registers the TCP client address for a peer node.
@@ -175,31 +239,59 @@ func (rn *RaftNode) IsLeader() bool {
 	return rn.state == Leader
 }
 
-// RecoverFromWAL replays the WAL file to rebuild rn.log and rn.dataStore.
-// Must be called after SetWAL and before Start().
+// RecoverFromWAL rebuilds rn.log, rn.dataStore, currentTerm, and votedFor.
+// If a snapshot file exists it is loaded first; only WAL entries after
+// snapshotIndex are then replayed on top.
+// Must be called after SetWAL (and SetSnapshotPath if using snapshots) and before Start().
 func (rn *RaftNode) RecoverFromWAL() error {
+	// --- Step 1: load snapshot if one exists ---
+	if rn.snapshotPath != "" {
+		snap, err := ReadSnapshot(rn.snapshotPath)
+		if err != nil {
+			return err
+		}
+		if snap != nil {
+			rn.snapshotIndex = snap.SnapshotIndex
+			rn.snapshotTerm = snap.SnapshotTerm
+			rn.currentTerm = snap.CurrentTerm
+			rn.votedFor = snap.VotedFor
+			rn.commitIndex = snap.SnapshotIndex
+			rn.lastApplied = snap.SnapshotIndex
+			for k, v := range snap.DataStore {
+				rn.dataStore[k] = v
+			}
+			log.Printf("[%s] Snapshot loaded: index=%d term=%d %d keys",
+				rn.id, snap.SnapshotIndex, snap.SnapshotTerm, len(snap.DataStore))
+		}
+	}
+
 	if rn.wal == nil {
 		return nil
 	}
 
+	// --- Step 2: replay WAL records that follow the snapshot ---
 	records, err := rn.wal.ReadAll()
 	if err != nil {
 		return err
 	}
 	if len(records) == 0 {
-		log.Printf("[%s] WAL empty — fresh start", rn.id)
+		log.Printf("[%s] WAL empty — nothing to replay", rn.id)
 		return nil
 	}
 
 	log.Printf("[%s] WAL found %d records — replaying...", rn.id, len(records))
 
-	lastCommitIndex := int32(-1)
-	lastTerm := int32(0)
-	lastVotedFor := ""
+	lastCommitIndex := rn.commitIndex
+	lastTerm := rn.currentTerm
+	lastVotedFor := rn.votedFor
 
 	for _, rec := range records {
 		switch rec.Type {
 		case RecordTypeEntry:
+			// Skip entries already covered by the snapshot.
+			if rec.Index <= rn.snapshotIndex {
+				continue
+			}
 			entry := LogEntry{Term: rec.Term, Command: rec.Command}
 			for int32(len(rn.log)) <= rec.Index {
 				rn.log = append(rn.log, LogEntry{})
@@ -210,7 +302,6 @@ func (rn *RaftNode) RecoverFromWAL() error {
 				lastCommitIndex = rec.CommitIndex
 			}
 		case RecordTypeTermVote:
-			// Track the last (highest-sequence) term/vote record.
 			lastTerm = rec.Term
 			lastVotedFor = rec.VotedFor
 		}
@@ -221,12 +312,13 @@ func (rn *RaftNode) RecoverFromWAL() error {
 		rn.votedFor = lastVotedFor
 	}
 
-	if lastCommitIndex >= 0 {
+	if lastCommitIndex > rn.lastApplied {
 		rn.commitIndex = lastCommitIndex
-		rn.lastApplied = -1
 		for rn.lastApplied < rn.commitIndex {
 			rn.lastApplied++
-			rn.executeCommand(rn.lastApplied, rn.log[rn.lastApplied].Command)
+			if int(rn.lastApplied) < len(rn.log) {
+				rn.executeCommand(rn.lastApplied, rn.log[rn.lastApplied].Command)
+			}
 		}
 	}
 

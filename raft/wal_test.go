@@ -346,3 +346,47 @@ func TestWALRecovery_EndToEnd(t *testing.T) {
 
 	t.Log("✅ End-to-end WAL recovery: all keys (including DELETE) restored after simulated restart")
 }
+
+// TestWAL_Truncate verifies that after Truncate the WAL file is empty and new
+// records can be appended and read back correctly.
+func TestWAL_Truncate(t *testing.T) {
+	wal, path := tempWAL(t)
+	defer os.Remove(path)
+	defer wal.Close()
+
+	// Write some entries
+	_ = wal.AppendEntry(0, LogEntry{Term: 1, Command: "SET a 1"})
+	_ = wal.AppendEntry(1, LogEntry{Term: 1, Command: "SET b 2"})
+	_ = wal.AppendCommit(1)
+
+	// Truncate
+	if err := wal.Truncate(); err != nil {
+		t.Fatalf("Truncate failed: %v", err)
+	}
+
+	// File must be empty now
+	records, err := wal.ReadAll()
+	if err != nil {
+		t.Fatalf("ReadAll after Truncate failed: %v", err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("expected 0 records after Truncate, got %d", len(records))
+	}
+
+	// New records appended after truncate must be readable
+	if err := wal.AppendTermVote(5, "nodeZ"); err != nil {
+		t.Fatalf("AppendTermVote after Truncate failed: %v", err)
+	}
+
+	records, err = wal.ReadAll()
+	if err != nil {
+		t.Fatalf("ReadAll after post-truncate append failed: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record after post-truncate append, got %d", len(records))
+	}
+	if records[0].Type != RecordTypeTermVote || records[0].Term != 5 || records[0].VotedFor != "nodeZ" {
+		t.Errorf("unexpected record: %+v", records[0])
+	}
+	t.Log("✅ Truncate clears WAL and allows fresh appends")
+}
