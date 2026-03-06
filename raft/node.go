@@ -74,8 +74,11 @@ type RaftNode struct {
 	// Persistence
 	wal          WAL
 	snapshotPath string
-	snapshotIndex int32 // log index of the last entry captured in the snapshot
-	snapshotTerm  int32 // term of that entry
+	snapshotIndex int32
+	snapshotTerm  int32
+
+	// Lifecycle
+	stopCh chan struct{} // closed by Stop() to halt background goroutines
 }
 
 // NewRaftNode creates a new Raft node
@@ -96,6 +99,7 @@ func NewRaftNode(id string, peers map[string]string) *RaftNode {
 		leaderId:        "",
 		lastHeartbeat:   time.Now(),
 		snapshotIndex:   -1,
+		stopCh:          make(chan struct{}),
 	}
 
 	return node
@@ -334,11 +338,27 @@ func (rn *RaftNode) Start() {
 	go rn.runElectionTimer()
 }
 
+// Stop signals all background goroutines to exit.
+// Call after removing the node from the cluster or in tests when simulating a crash.
+func (rn *RaftNode) Stop() {
+	select {
+	case <-rn.stopCh:
+		// already stopped
+	default:
+		close(rn.stopCh)
+	}
+}
+
 // runElectionTimer manages election timeout and triggers elections
 func (rn *RaftNode) runElectionTimer() {
 	for {
 		timeoutDuration := rn.getElectionTimeout()
-		time.Sleep(50 * time.Millisecond)
+
+		select {
+		case <-rn.stopCh:
+			return
+		case <-time.After(50 * time.Millisecond):
+		}
 
 		rn.mu.Lock()
 		currentState := rn.state
@@ -431,6 +451,12 @@ func (rn *RaftNode) sendHeartbeats() {
 	defer ticker.Stop()
 
 	for {
+		select {
+		case <-rn.stopCh:
+			return
+		case <-ticker.C:
+		}
+
 		rn.mu.RLock()
 		if rn.state != Leader {
 			rn.mu.RUnlock()
@@ -442,8 +468,6 @@ func (rn *RaftNode) sendHeartbeats() {
 		for peerID, peerAddr := range rn.peers {
 			go rn.sendAppendEntries(peerID, peerAddr, term)
 		}
-
-		<-ticker.C
 	}
 }
 

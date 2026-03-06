@@ -192,9 +192,12 @@ func TestSplitBrain(t *testing.T) {
 	
 	log.Printf("Initial leader: %s", initialLeader.id)
 	
-	// SIMULATE PARTITION: Stop the leader's gRPC server
+	// SIMULATE PARTITION: Stop the leader's gRPC server and halt its goroutines.
+	// Without Stop(), the leader's sendHeartbeats keeps running and prevents
+	// the remaining nodes from timing out and starting a new election.
 	log.Printf("🔥 SIMULATING PARTITION: Stopping leader %s", initialLeader.id)
-	
+	initialLeader.Stop()
+
 	if initialLeader.id == "node1" {
 		server1.Stop()
 	} else if initialLeader.id == "node2" {
