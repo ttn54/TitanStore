@@ -17,27 +17,24 @@ import (
 
 func main() {
 	nodeID := flag.String("id", "node1", "Node ID")
-	port := flag.String("port", "5001", "Port to listen on")
+	port := flag.String("port", "5001", "gRPC port to listen on")
 	clientPort := flag.String("client-port", "", "TCP client listener port (e.g. 6001); empty = disabled")
+	advertiseClientAddr := flag.String("advertise-client-addr", "", "Advertised TCP client address for this node (e.g. localhost:6001)")
+	peersFlag := flag.String("peers", "", "Comma-separated peer list: id:host:grpcPort:tcpPort,... (e.g. node2:localhost:5002:6002,node3:localhost:5003:6003)")
 	flag.Parse()
 
-	peers := make(map[string]string)
-	allNodes := map[string]string{
-		"node1": "localhost:5001",
-		"node2": "localhost:5002",
-		"node3": "localhost:5003",
-	}
-
-	for id, addr := range allNodes {
-		if id != *nodeID {
-			peers[id] = addr
-		}
+	grpcPeers, tcpPeers, err := raft.ParsePeersFlag(*peersFlag)
+	if err != nil {
+		log.Fatalf("Invalid --peers flag: %v", err)
 	}
 
 	log.Printf("Starting TitanStore Raft Node: %s on port %s", *nodeID, *port)
-	log.Printf("Peers: %v", peers)
+	log.Printf("Peers: %v", grpcPeers)
 
-	node := raft.NewRaftNode(*nodeID, peers)
+	node := raft.NewRaftNode(*nodeID, grpcPeers)
+	for id, addr := range tcpPeers {
+		node.SetPeerClientAddr(id, addr)
+	}
 
 	// --- WAL boot sequence ---
 	walPath := fmt.Sprintf("disk_%s.wal", *nodeID)
@@ -68,6 +65,10 @@ func main() {
 		tcpSrv, tcpErr = raft.NewTCPServer(node, ":"+*clientPort)
 		if tcpErr != nil {
 			log.Fatalf("Failed to start TCP client listener: %v", tcpErr)
+		}
+		// Register this node's own TCP client address so peers can redirect to it.
+		if *advertiseClientAddr != "" {
+			node.SetPeerClientAddr(*nodeID, *advertiseClientAddr)
 		}
 		go tcpSrv.Serve()
 	}

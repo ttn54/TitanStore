@@ -118,7 +118,7 @@ func (s *TCPServer) propose(command string) string {
 	if s.node.AppendEntry(command) {
 		return "OK"
 	}
-	if addr, ok := s.node.GetLeaderAddr(); ok {
+	if addr, ok := s.node.GetLeaderClientAddr(); ok {
 		return fmt.Sprintf("ERR NOT_LEADER %s", addr)
 	}
 	return "ERR NO_LEADER"

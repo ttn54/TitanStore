@@ -63,7 +63,8 @@ type RaftNode struct {
 	matchIndex map[string]int32
 
 	// Cluster configuration
-	peers map[string]string
+	peers           map[string]string
+	peerClientAddrs map[string]string // TCP client address per peer (id → host:port)
 
 	// Election timer tracking
 	lastHeartbeat time.Time
@@ -86,8 +87,9 @@ func NewRaftNode(id string, peers map[string]string) *RaftNode {
 		state:         Follower,
 		nextIndex:     make(map[string]int32),
 		matchIndex:    make(map[string]int32),
-		peers:         peers,
-		dataStore:     make(map[string]string),
+		peers:           peers,
+		peerClientAddrs: make(map[string]string),
+		dataStore:       make(map[string]string),
 		leaderId:      "",
 		lastHeartbeat: time.Now(),
 	}
@@ -99,6 +101,33 @@ func NewRaftNode(id string, peers map[string]string) *RaftNode {
 // Must be called before Start().
 func (rn *RaftNode) SetWAL(w WAL) {
 	rn.wal = w
+}
+
+// SetPeerClientAddr registers the TCP client address for a peer node.
+// Must be called before Start(). Safe to call multiple times.
+func (rn *RaftNode) SetPeerClientAddr(peerID, addr string) {
+	rn.mu.Lock()
+	defer rn.mu.Unlock()
+	rn.peerClientAddrs[peerID] = addr
+}
+
+// GetLeaderClientAddr returns the TCP client address of the known leader.
+// Falls back to the gRPC peer address when no TCP address is registered.
+// Returns ("", false) when the leader is unknown.
+func (rn *RaftNode) GetLeaderClientAddr() (string, bool) {
+	rn.mu.RLock()
+	defer rn.mu.RUnlock()
+	if rn.leaderId == "" {
+		return "", false
+	}
+	if addr, ok := rn.peerClientAddrs[rn.leaderId]; ok {
+		return addr, true
+	}
+	// Fallback: return gRPC address so old behaviour is preserved.
+	if addr, ok := rn.peers[rn.leaderId]; ok {
+		return addr, true
+	}
+	return "", false
 }
 
 // persistTermVote writes the current term and votedFor to the WAL.
