@@ -115,7 +115,8 @@ func (s *TCPServer) handleConn(conn net.Conn) {
 // propose submits command to the Raft log if this node is leader.
 // Returns "OK", "ERR NOT_LEADER <addr>", or "ERR NO_LEADER".
 func (s *TCPServer) propose(command string) string {
-	if s.node.AppendEntry(command) {
+	err := s.node.Propose(command)
+	if err == nil {
 		return "OK"
 	}
 	if addr, ok := s.node.GetLeaderClientAddr(); ok {

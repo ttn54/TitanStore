@@ -87,6 +87,47 @@ func TestWAL_AppendAndReadBack(t *testing.T) {
 	t.Log("✅ All entries and commit record read back correctly")
 }
 
+// TestWAL_AppendEntryBatch writes multiple entries at once, then reads them back.
+func TestWAL_AppendEntryBatch(t *testing.T) {
+	wal, path := tempWAL(t)
+	defer os.Remove(path)
+	defer wal.Close()
+
+	entries := []LogEntry{
+		{Term: 2, Command: "SET batch 1"},
+		{Term: 2, Command: "SET batch 2"},
+		{Term: 2, Command: "SET batch 3"},
+	}
+
+	if err := wal.AppendEntryBatch(10, entries); err != nil {
+		t.Fatalf("AppendEntryBatch failed: %v", err)
+	}
+
+	recs, err := wal.ReadAll()
+	if err != nil {
+		t.Fatalf("ReadAll failed: %v", err)
+	}
+
+	if len(recs) != len(entries) {
+		t.Fatalf("expected %d records, got %d", len(entries), len(recs))
+	}
+
+	for i, e := range entries {
+		if recs[i].Type != RecordTypeEntry {
+			t.Errorf("record %d: expected type %v, got %v", i, RecordTypeEntry, recs[i].Type)
+		}
+		if recs[i].Index != int32(10+i) {
+			t.Errorf("record %d: expected index %d, got %d", i, 10+i, recs[i].Index)
+		}
+		if recs[i].Term != e.Term {
+			t.Errorf("record %d: expected term %d, got %d", i, e.Term, recs[i].Term)
+		}
+		if recs[i].Command != e.Command {
+			t.Errorf("record %d: expected command %s, got %s", i, e.Command, recs[i].Command)
+		}
+	}
+}
+
 // TestWAL_EmptyFile verifies that reading an empty WAL returns zero records
 // without an error — this is the fresh-start case.
 func TestWAL_EmptyFile(t *testing.T) {

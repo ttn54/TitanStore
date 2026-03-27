@@ -71,6 +71,9 @@ func TestTCPServer_GET(t *testing.T) {
 // TestTCPServer_SET_Leader verifies that SET on a leader node returns OK.
 func TestTCPServer_SET_Leader(t *testing.T) {
 	node := NewRaftNode("leader-node", map[string]string{})
+	node.Start()
+	defer node.Stop()
+
 	// Manually promote to leader state so AppendEntry succeeds
 	node.mu.Lock()
 	node.state = Leader
@@ -108,6 +111,9 @@ func TestTCPServer_SET_Leader(t *testing.T) {
 // TestTCPServer_SET_Follower verifies that SET on a follower returns ERR NOT_LEADER.
 func TestTCPServer_SET_Follower(t *testing.T) {
 	node := NewRaftNode("follower-node", map[string]string{"leader-node": "localhost:5001"})
+	node.Start()
+	defer node.Stop()
+
 	// Stays as Follower with a known leader
 	node.mu.Lock()
 	node.leaderId = "leader-node"
@@ -137,6 +143,8 @@ func TestTCPServer_SET_Follower(t *testing.T) {
 // leader's TCP client address (not its gRPC address) so TitanSync can reconnect.
 func TestTCPServer_Redirect_ReturnsTCPAddr(t *testing.T) {
 	node := NewRaftNode("follower-node", map[string]string{"leader-node": "localhost:5001"})
+	node.Start()
+	defer node.Stop()
 	node.SetPeerClientAddr("leader-node", "localhost:6001")
 	node.mu.Lock()
 	node.leaderId = "leader-node"

@@ -198,11 +198,12 @@ func TestSplitBrain(t *testing.T) {
 	log.Printf("🔥 SIMULATING PARTITION: Stopping leader %s", initialLeader.id)
 	initialLeader.Stop()
 
-	if initialLeader.id == "node1" {
+	switch initialLeader.id {
+case "node1":
 		server1.Stop()
-	} else if initialLeader.id == "node2" {
+	case "node2":
 		server2.Stop()
-	} else {
+	default:
 		server3.Stop()
 	}
 

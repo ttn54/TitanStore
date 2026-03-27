@@ -2,6 +2,7 @@ package raft
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"math/rand"
 	"strings"
@@ -13,6 +14,12 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
+
+// Proposal represents a user command submitted via TCP waiting to be grouped and committed.
+type Proposal struct {
+	Command string
+	ErrCh   chan error
+}
 
 // NodeState represents the three possible states in Raft
 type NodeState int
@@ -77,6 +84,9 @@ type RaftNode struct {
 	snapshotIndex int32
 	snapshotTerm  int32
 
+	// Proposals
+	proposeCh chan *Proposal
+
 	// Lifecycle
 	stopCh chan struct{} // closed by Stop() to halt background goroutines
 }
@@ -99,6 +109,7 @@ func NewRaftNode(id string, peers map[string]string) *RaftNode {
 		leaderId:        "",
 		lastHeartbeat:   time.Now(),
 		snapshotIndex:   -1,
+		proposeCh:       make(chan *Proposal, 1024),
 		stopCh:          make(chan struct{}),
 	}
 
@@ -333,9 +344,12 @@ func (rn *RaftNode) RecoverFromWAL() error {
 
 // Start begins the Raft consensus protocol
 func (rn *RaftNode) Start() {
+	rn.mu.Lock()
 	log.Printf("[%s] Starting Raft node in %s state", rn.id, rn.state)
 	rn.lastHeartbeat = time.Now()
+	rn.mu.Unlock()
 	go rn.runElectionTimer()
+	go rn.runBatchCommitter()
 }
 
 // Stop signals all background goroutines to exit.
@@ -366,7 +380,7 @@ func (rn *RaftNode) runElectionTimer() {
 		rn.mu.Unlock()
 
 		if currentState != Leader && timeSinceHeartbeat > timeoutDuration {
-			log.Printf("[%s] Election timeout! Starting election...", rn.id)
+			log.Printf("[%s] Election timeout! Starting election... (since: %v, limit: %v)", rn.id, timeSinceHeartbeat, timeoutDuration)
 			rn.startElection()
 		}
 	}
@@ -671,6 +685,7 @@ func (rn *RaftNode) RequestVote(ctx context.Context, req *pb.VoteRequest) (*pb.V
 
 		if logOk {
 			rn.votedFor = req.CandidateId
+			rn.lastHeartbeat = time.Now()
 			voteGranted = true
 			rn.resetElectionTimer()
 			rn.persistTermVote()
@@ -769,4 +784,87 @@ func (rn *RaftNode) AppendEntry(command string) bool {
 	rn.log = append(rn.log, entry)
 	log.Printf("[%s] Leader appended entry: %s (index: %d)", rn.id, command, newIndex)
 	return true
+}
+
+func (rn *RaftNode) Propose(command string) error {
+	p := &Proposal{
+		Command: command,
+		ErrCh:   make(chan error, 1),
+	}
+
+	select {
+	case rn.proposeCh <- p:
+		return <-p.ErrCh
+	case <-rn.stopCh:
+		return fmt.Errorf("raft node is stopped")
+	}
+}
+
+func (rn *RaftNode) runBatchCommitter() {
+	buffer := make([]*Proposal, 0, 100)
+	var commands []LogEntry
+	timer := time.NewTimer(100 * time.Millisecond) // dummy timer
+	timer.Stop()
+
+	for {
+		select {
+		case <-rn.stopCh:
+			return
+		case p := <-rn.proposeCh:
+			if len(buffer) == 0 {
+				timer.Reset(2 * time.Millisecond) // wait for 2ms
+			}
+			buffer = append(buffer, p)
+			commands = append(commands, LogEntry{Command: p.Command, Term: 0}) // We'll set the correct term and index below
+
+			if len(buffer) >= 100 {
+				timer.Stop()
+				rn.processBatch(buffer, commands)
+				buffer = buffer[:0]
+				commands = commands[:0]
+			}
+		case <-timer.C:
+			if len(buffer) > 0 {
+				rn.processBatch(buffer, commands)
+				buffer = buffer[:0]
+				commands = commands[:0]
+			}
+		}
+	}
+}
+
+func (rn *RaftNode) processBatch(proposals []*Proposal, entries []LogEntry) {
+	rn.mu.Lock()
+	if rn.state != Leader {
+		rn.mu.Unlock()
+		for _, p := range proposals {
+			p.ErrCh <- fmt.Errorf("not a leader")
+		}
+		return
+	}
+
+	term := rn.currentTerm
+	startIndex := int32(len(rn.log))
+
+	for i := range entries {
+		entries[i].Term = term
+	}
+	rn.log = append(rn.log, entries...)
+	rn.mu.Unlock()
+
+	// Write to WAL in a single fsync
+	if rn.wal != nil {
+		if err := rn.wal.AppendEntryBatch(startIndex, entries); err != nil {
+			log.Printf("[%s] WAL batched write failed: %v", rn.id, err)
+			// We would ideally rollback the log, but for now we'll just return errors
+			for _, p := range proposals {
+				p.ErrCh <- err
+			}
+			return
+		}
+	}
+
+	for _, p := range proposals {
+		p.ErrCh <- nil // success
+	}
 }

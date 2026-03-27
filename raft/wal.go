@@ -40,6 +40,9 @@ type WAL interface {
 	// the in-memory log.
 	AppendEntry(index int32, entry LogEntry) error
 
+	// AppendEntryBatch writes multiple log entries in a single atomic disk flush.
+	AppendEntryBatch(startingIndex int32, entries []LogEntry) error
+
 	// AppendCommit writes a commit marker so boot-sequence recovery knows
 	// which entries have already been applied to the state machine.
 	AppendCommit(commitIndex int32) error
@@ -117,6 +120,40 @@ func (w *FileWAL) AppendEntry(index int32, entry LogEntry) error {
 		Term:    entry.Term,
 		Command: entry.Command,
 	})
+}
+
+// AppendEntryBatch writes multiple log-entry records and syncs them once to disk.
+func (w *FileWAL) AppendEntryBatch(startingIndex int32, entries []LogEntry) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	for i, entry := range entries {
+		rec := WALRecord{
+			Type:    RecordTypeEntry,
+			Index:   startingIndex + int32(i),
+			Term:    entry.Term,
+			Command: entry.Command,
+		}
+
+		var buf bytes.Buffer
+		if err := gob.NewEncoder(&buf).Encode(rec); err != nil {
+			return err
+		}
+
+		data := buf.Bytes()
+		lenBuf := make([]byte, 4)
+		binary.BigEndian.PutUint32(lenBuf, uint32(len(data)))
+
+		if _, err := w.file.Write(lenBuf); err != nil {
+			return err
+		}
+		if _, err := w.file.Write(data); err != nil {
+			return err
+		}
+	}
+
+	// fsync once for the entire batch.
+	return w.file.Sync()
 }
 
 // AppendCommit writes a commit marker so recovery can rebuild the state machine.
